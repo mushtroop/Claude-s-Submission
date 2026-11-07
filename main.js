@@ -1,6 +1,13 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries as mergeRaw } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// merges shapes into one mesh (fewer draw calls); shouts clearly if three.js refuses
+function mergeGeometries(list) {
+  const g = mergeRaw(list);
+  if (!g) throw new Error('mergeGeometries failed (the shapes have mismatched attributes)');
+  return g;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Tuning - tweak these to change how things feel                     */
@@ -32,6 +39,7 @@ const CFG = {
   botTurnRate: 9,        // how quickly bots change direction
   botWanderSpeed: 2.2,   // jog speed when nobody is threatening them
   fleeRange: 16,         // bots notice infected players within this distance (m)
+  spotRange: 14,         // an infected player "spots" healthy ones within this distance (scared face)
   tagRadius: 0.5,        // reach for tags involving you (m)
   botTagDistance: 0.8,   // bot-to-bot tag distance (m)
   startGrace: 3,         // seconds the first infected bot stands still
@@ -101,9 +109,9 @@ function lerpAngle(from, to, k) {
   return from + d * k;
 }
 
-// Plushie color choices (red is reserved for "infected")
+// Monkey fur colors (red is reserved for "infected")
 const PALETTE = [
-  { name: 'Pink', hex: 0xff8fc7 }, { name: 'Orange', hex: 0xffa24d },
+  { name: 'Orange', hex: 0xffa800 }, { name: 'Pink', hex: 0xff8fc7 },
   { name: 'Yellow', hex: 0xffe14d }, { name: 'Lime', hex: 0xa6e84d },
   { name: 'Green', hex: 0x3fcf6f }, { name: 'Teal', hex: 0x2fd6c4 },
   { name: 'Sky', hex: 0x5ec8ff }, { name: 'Blue', hex: 0x4d7dff },
@@ -121,6 +129,22 @@ try {
 /*  Everything you can stand on or grab is added to `colliders`.       */
 /* ================================================================== */
 const colliders = [];
+const statics = new Map(); // static scenery, merged per color so it draws in a handful of calls
+
+function addStatic(geo, color, flat = false) {
+  const key = color + (flat ? 'f' : '');
+  let b = statics.get(key);
+  if (!b) { b = { color, flat, list: [] }; statics.set(key, b); }
+  b.list.push(geo);
+}
+
+function flushStatics() {
+  for (const b of statics.values()) {
+    const merged = mergeGeometries(b.list);
+    scene.add(new THREE.Mesh(merged, lambert(b.color, b.flat)));
+  }
+  statics.clear();
+}
 
 function addBoxCollider(cx, cy, cz, sx, sy, sz, yaw = 0) {
   const hx = sx / 2, hy = sy / 2, hz = sz / 2;
@@ -139,54 +163,54 @@ function addCylCollider(cx, cz, R, y0, y1) {
 }
 
 function addBox(cx, cy, cz, sx, sy, sz, color, yaw = 0) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), lambert(color));
-  m.position.set(cx, cy, cz);
-  m.rotation.y = yaw;
-  scene.add(m);
+  const g = new THREE.BoxGeometry(sx, sy, sz);
+  g.rotateY(yaw);
+  g.translate(cx, cy, cz);
+  addStatic(g, color);
   addBoxCollider(cx, cy, cz, sx, sy, sz, yaw);
 }
 
 function addPost(cx, cz, R, y0, y1, color, seg = 12) {
   const h = y1 - y0;
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(R, R, h, seg), lambert(color));
-  m.position.set(cx, y0 + h / 2, cz);
-  scene.add(m);
+  const g = new THREE.CylinderGeometry(R, R, h, seg);
+  g.translate(cx, y0 + h / 2, cz);
+  addStatic(g, color);
   addCylCollider(cx, cz, R, y0, y1);
 }
 
 function addStump(cx, cz, R, h) {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(R, R * 1.12, h, 16), lambert(0x8a5a33));
-  m.position.set(cx, h / 2, cz);
-  scene.add(m);
+  const g = new THREE.CylinderGeometry(R, R * 1.12, h, 16);
+  g.translate(cx, h / 2, cz);
+  addStatic(g, 0x8a5a33);
   addCylCollider(cx, cz, R, 0, h);
 }
 
 function addRock(cx, cz, R, h) {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.8, R, h, 7), lambert(0x8d9199, true));
-  m.position.set(cx, h / 2, cz);
-  scene.add(m);
+  const g = new THREE.CylinderGeometry(R * 0.8, R, h, 7);
+  g.translate(cx, h / 2, cz);
+  addStatic(g, 0x8d9199, true);
   addCylCollider(cx, cz, R, 0, h);
 }
 
 function addMushroom(cx, cz, stemH) {
   addPost(cx, cz, 0.22, 0, stemH, 0xe8dcc0, 10);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.0, 0.3, 16), lambert(0xd9443a));
-  cap.position.set(cx, stemH + 0.15, cz);
-  scene.add(cap);
+  const g = new THREE.CylinderGeometry(0.9, 1.0, 0.3, 16);
+  g.translate(cx, stemH + 0.15, cz);
+  addStatic(g, 0xd9443a);
   addCylCollider(cx, cz, 1.0, stemH, stemH + 0.3);
 }
 
 function addFoliage(x, yBase, z, r, h, color) {
-  const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 9), lambert(color, true));
-  m.position.set(x, yBase + h / 2, z);
-  scene.add(m);
+  const g = new THREE.ConeGeometry(r, h, 9);
+  g.translate(x, yBase + h / 2, z);
+  addStatic(g, color, true);
 }
 
 function addDisc(x, z, r, color) {
-  const m = new THREE.Mesh(new THREE.CircleGeometry(r, 40), lambert(color));
-  m.rotation.x = -Math.PI / 2;
-  m.position.set(x, 0.015, z);
-  scene.add(m);
+  const g = new THREE.CircleGeometry(r, 40);
+  g.rotateX(-Math.PI / 2);
+  g.translate(x, 0.015, z);
+  addStatic(g, color);
 }
 
 // Zones kept clear of random trees and spawn points
@@ -372,6 +396,7 @@ function buildWorld() {
     m.frustumCulled = false;
     scene.add(m);
   }
+  flushStatics();
 }
 buildWorld();
 
@@ -448,8 +473,8 @@ function sphereWorld(p, r, outN) {
 const BOT_LIM = CFG.worldHalfSize - 1.5; // bots stay inside this square
 const blockers = [];
 for (const c of colliders) {
-  if (c.t === 0 && c.minY < 1.9 && c.maxY > 0.4) blockers.push({ k: 1, x: c.cx, z: c.cz, hx: c.hx, hz: c.hz, c: c.c, s: c.s });
-  if (c.t === 1 && c.y0 < 1.9 && c.y1 > 0.4) blockers.push({ k: 0, x: c.cx, z: c.cz, r: c.R });
+  if (c.t === 0 && c.minY < 1.9 && c.maxY > 0.4) blockers.push({ k: 1, x: c.cx, z: c.cz, hx: c.hx, hz: c.hz, c: c.c, s: c.s, y0: c.minY, y1: c.maxY });
+  if (c.t === 1 && c.y0 < 1.9 && c.y1 > 0.4) blockers.push({ k: 0, x: c.cx, z: c.cz, r: c.R, y0: c.y0, y1: c.y1 });
 }
 
 function blockedAt(x, z, m) {
@@ -464,6 +489,47 @@ function blockedAt(x, z, m) {
       const lx = dx * b.c - dz * b.s, lz = dx * b.s + dz * b.c;
       const ox = Math.max(Math.abs(lx) - b.hx, 0), oz = Math.max(Math.abs(lz) - b.hz, 0);
       if (ox * ox + oz * oz < m * m) return true;
+    }
+  }
+  return false;
+}
+
+// Can a straight line from A to B (at eye height) be blocked by a tree, wall or stump?
+function sightBlocked(ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az;
+  const len2 = dx * dx + dz * dz || 1;
+  for (let i = 0; i < blockers.length; i++) {
+    const b = blockers[i];
+    if (!(b.y0 < 1.5 && b.y1 > 1.5)) continue; // low logs and overhead beams don't block eye-level sight
+    if (b.k === 0) {
+      const t = Math.max(0, Math.min(1, ((b.x - ax) * dx + (b.z - az) * dz) / len2));
+      const px = ax + dx * t - b.x, pz = az + dz * t - b.z;
+      const rr = b.r + 0.05;
+      if (px * px + pz * pz < rr * rr) return true;
+    } else {
+      // segment vs rotated box: move into the box's own frame, then do a slab test
+      const lax = (ax - b.x) * b.c - (az - b.z) * b.s, laz = (ax - b.x) * b.s + (az - b.z) * b.c;
+      const lbx = (bx - b.x) * b.c - (bz - b.z) * b.s, lbz = (bx - b.x) * b.s + (bz - b.z) * b.c;
+      const ldx = lbx - lax, ldz = lbz - laz;
+      const hx = b.hx + 0.05, hz = b.hz + 0.05;
+      let t0 = 0, t1 = 1, miss = false;
+      if (Math.abs(ldx) < 1e-9) { if (Math.abs(lax) > hx) miss = true; }
+      else {
+        let ta = (-hx - lax) / ldx, tb = (hx - lax) / ldx;
+        if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+        t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+        if (t0 > t1) miss = true;
+      }
+      if (!miss) {
+        if (Math.abs(ldz) < 1e-9) { if (Math.abs(laz) > hz) miss = true; }
+        else {
+          let ta = (-hz - laz) / ldz, tb = (hz - laz) / ldz;
+          if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+          t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+          if (t0 > t1) miss = true;
+        }
+      }
+      if (!miss) return true;
     }
   }
   return false;
@@ -519,6 +585,7 @@ const hands = [0, 1].map((i) => {
     active: false,
     touching: false,
     hasPrev: false,
+    model: null, // the visible paw (created further down)
     prevLocal: new THREE.Vector3(),
   };
 
@@ -526,13 +593,13 @@ const hands = [0, 1].map((i) => {
     hand.source = e.data;
     hand.active = true;
     hand.hasPrev = false;
-    mesh.visible = true;
+    if (hand.model) hand.model.visible = true;
     applyPlayerVisual();
   });
   controller.addEventListener('disconnected', () => {
     hand.source = null;
     hand.active = false;
-    mesh.visible = false;
+    if (hand.model) hand.model.visible = false;
   });
   return hand;
 });
@@ -616,9 +683,13 @@ function drawHud(main, mainColor, sub) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Plushie model (a teddy bear) - used by you, the bots and the statue */
+/*  Monkey model: orange fur, tan face / belly / hands, black outlines, */
+/*  a curly tail and mushroom spikes on its back. No legs - it stands   */
+/*  on its long arms. Used by you, the bots and the statue.             */
 /* ------------------------------------------------------------------ */
-const E0 = 1.55; // eye (head centre) height of the plushie model, in model units
+const E0 = 1.55;       // eye (head centre) height of the model, in model units
+const TAN = 0xc9a46e;
+const HULL_T = 0.012;  // outline thickness
 
 function shapeGeo(base, x, y, z, sx, sy, sz) {
   const g = base.clone();
@@ -627,84 +698,224 @@ function shapeGeo(base, x, y, z, sx, sy, sz) {
   return g;
 }
 
-const PL = (() => {
+// Outline: a slightly fatter copy drawn inside-out in black
+function hullOf(geo, t) {
+  const g = geo.clone();
+  const p = g.attributes.position, n = g.attributes.normal;
+  for (let i = 0; i < p.count; i++) {
+    p.setXYZ(i, p.getX(i) + n.getX(i) * t, p.getY(i) + n.getY(i) * t, p.getZ(i) + n.getZ(i) * t);
+  }
+  return g;
+}
+
+// The two faces from your drawings, painted on a canvas
+function makeFaceTexture(scared) {
+  const c = document.createElement('canvas');
+  c.width = 384;
+  c.height = 256;
+  const x = c.getContext('2d');
+  // tan face shape with a thick black outline
+  x.fillStyle = '#c9a46e';
+  x.strokeStyle = '#111111';
+  x.lineWidth = 12;
+  x.beginPath();
+  x.ellipse(192, 128, 178, 118, 0, 0, Math.PI * 2);
+  x.fill();
+  x.stroke();
+  x.fillStyle = '#111111';
+  x.strokeStyle = '#111111';
+  x.lineCap = 'round';
+
+  if (!scared) {
+    // happy: one open eye, one winking eye, open smile
+    x.beginPath(); x.ellipse(128, 112, 17, 29, 0, 0, Math.PI * 2); x.fill();
+    x.lineWidth = 10;
+    x.beginPath(); x.arc(256, 132, 20, Math.PI * 1.1, Math.PI * 1.9); x.stroke();
+    x.beginPath();
+    x.moveTo(154, 186);
+    x.quadraticCurveTo(192, 246, 230, 186);
+    x.closePath();
+    x.fill();
+    x.fillStyle = '#d2875f'; // tongue
+    x.beginPath(); x.ellipse(192, 212, 19, 9, 0, 0, Math.PI * 2); x.fill();
+  } else {
+    // scared (spotted by a tagger): big shiny eyes and a little frown
+    x.beginPath(); x.ellipse(128, 112, 19, 31, 0, 0, Math.PI * 2); x.fill();
+    x.beginPath(); x.ellipse(256, 112, 19, 31, 0, 0, Math.PI * 2); x.fill();
+    x.fillStyle = '#ffffff';
+    x.beginPath(); x.arc(121, 99, 6, 0, Math.PI * 2); x.fill();
+    x.beginPath(); x.arc(249, 99, 6, 0, Math.PI * 2); x.fill();
+    x.strokeStyle = '#111111';
+    x.lineWidth = 9;
+    x.beginPath(); x.arc(192, 228, 30, Math.PI * 1.2, Math.PI * 1.8); x.stroke();
+  }
+  // nostrils
+  x.fillStyle = '#111111';
+  x.beginPath(); x.arc(178, 158, 4, 0, Math.PI * 2); x.fill();
+  x.beginPath(); x.arc(206, 158, 4, 0, Math.PI * 2); x.fill();
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const MK = (() => {
   const sph = new THREE.SphereGeometry(1, 20, 14);
-  const cyl = new THREE.CylinderGeometry(1, 1, 1, 12);
+  const cyl = new THREE.CylinderGeometry(1, 1, 1, 14);
   const S = (x, y, z, sx, sy, sz) => shapeGeo(sph, x, y, z, sx, sy, sz);
+
+  // body: torso + shoulders + a curly tail
+  const tail = [[0, 0.76, -0.2, 0.09], [0.12, 0.72, -0.32, 0.085], [0.26, 0.73, -0.4, 0.08],
+    [0.4, 0.8, -0.43, 0.075], [0.5, 0.92, -0.4, 0.07], [0.55, 1.05, -0.34, 0.065]].map(([x, y, z, r]) => S(x, y, z, r, r, r));
+  const body = mergeGeometries([S(0, 1.0, 0, 0.27, 0.35, 0.2), S(-0.26, 1.22, 0.01, 0.13, 0.13, 0.13), S(0.26, 1.22, 0.01, 0.13, 0.13, 0.13), ...tail]);
+
+  // head (around its own pivot): head + ears + a spiky tuft of hair
+  const tuft = [[-0.03, 0.3], [0.03, -0.1], [0.09, -0.5]].map(([x, lean]) => {
+    const g = new THREE.ConeGeometry(0.035, 0.17, 6);
+    g.translate(0, 0.085, 0);
+    g.rotateZ(lean);
+    g.translate(x, 0.235, 0);
+    return g;
+  });
+  const head = mergeGeometries([S(0, 0, 0, 0.28, 0.25, 0.25), S(-0.27, 0.03, -0.02, 0.07, 0.09, 0.045), S(0.27, 0.03, -0.02, 0.07, 0.09, 0.045), ...tuft]);
+  const earInner = mergeGeometries([S(-0.27, 0.03, 0.012, 0.045, 0.06, 0.03), S(0.27, 0.03, 0.012, 0.045, 0.06, 0.03)]);
+
+  // the face is a curved patch that hugs the front of the head
+  const face = new THREE.SphereGeometry(1, 28, 20, Math.PI / 2 - 0.95, 1.9, Math.PI / 2 - 0.75, 1.5);
+  face.scale(0.28 * 1.012, 0.25 * 1.012, 0.25 * 1.012);
+
+  const belly = S(0, 0.98, 0.13, 0.17, 0.21, 0.1);
+
+  // mushroom spikes: cream stem + red cap with white spots, colored with vertex colors
+  const UPV = new THREE.Vector3(0, 1, 0);
+  const colored = (g, r, gr, b) => {
+    const n = g.attributes.position.count;
+    const a = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { a[i * 3] = r; a[i * 3 + 1] = gr; a[i * 3 + 2] = b; }
+    g.setAttribute('color', new THREE.BufferAttribute(a, 3));
+    return g;
+  };
+  const mushroom = (px, py, pz, dx, dy, dz, sc) => {
+    const stem = new THREE.CylinderGeometry(0.018, 0.026, 0.15, 8);
+    stem.translate(0, 0.075, 0);
+    const parts = [
+      colored(stem, 0.93, 0.88, 0.75),
+      colored(shapeGeo(sph, 0, 0.16, 0, 0.075, 0.042, 0.075), 0.8, 0.15, 0.15),
+      ...[[0, 0.202, 0], [0.04, 0.1937, 0.02], [-0.035, 0.193, 0.03], [0, 0.1936, -0.045]]
+        .map(([x, y, z]) => colored(shapeGeo(sph, x, y, z, 0.018, 0.008, 0.018), 1, 1, 1)),
+    ];
+    const g = mergeGeometries(parts);
+    g.scale(sc, sc, sc);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UPV, new THREE.Vector3(dx, dy, dz).normalize()));
+    g.translate(px, py, pz);
+    return g;
+  };
+  const mushrooms = mergeGeometries([
+    mushroom(0.0, 1.30, -0.16, 0, 0.55, -0.83, 1.0),
+    mushroom(-0.14, 1.20, -0.16, -0.3, 0.35, -0.88, 0.85),
+    mushroom(0.15, 1.18, -0.16, 0.3, 0.35, -0.88, 1.1),
+    mushroom(0.0, 1.05, -0.19, 0, 0.2, -0.98, 1.25),
+    mushroom(-0.12, 0.92, -0.17, -0.25, 0.1, -0.96, 0.85),
+    mushroom(0.13, 0.9, -0.17, 0.25, 0.1, -0.96, 0.95),
+    mushroom(-0.07, 1.72, -0.16, -0.2, 0.7, -0.68, 0.9),
+    mushroom(0.09, 1.74, -0.14, 0.25, 0.75, -0.6, 0.75),
+    mushroom(0.0, 1.78, -0.09, 0, 0.95, -0.3, 0.7),
+  ]);
+
+  // flat tan paw with four spread fingers
+  const fingers = [0, 1, 2, 3].map((i) => {
+    const g = S(0, 0, 0.075, 0.017, 0.013, 0.05);
+    g.rotateY((i - 1.5) * 0.2);
+    g.translate((i - 1.5) * 0.03, 0, 0);
+    return g;
+  });
+  const hand = mergeGeometries([S(0, 0, 0, 0.07, 0.025, 0.07), ...fingers]);
+  hand.scale(1.15, 1.15, 1.15);
+
   return {
-    sph, cyl,
-    torso: S(0, 1.0, 0, 0.30, 0.36, 0.26),
-    bodyAccent: mergeGeometries([S(0, 0.98, 0.14, 0.2, 0.24, 0.14), S(0, 0.82, -0.27, 0.09, 0.09, 0.09)]), // belly + tail
-    headMain: mergeGeometries([S(0, 0, 0, 0.23, 0.21, 0.22), S(-0.15, 0.18, -0.02, 0.085, 0.085, 0.05), S(0.15, 0.18, -0.02, 0.085, 0.085, 0.05)]),
-    headAccent: mergeGeometries([S(-0.15, 0.18, 0.012, 0.05, 0.05, 0.03), S(0.15, 0.18, 0.012, 0.05, 0.05, 0.03), S(0, -0.05, 0.17, 0.1, 0.075, 0.08)]),
-    headDark: mergeGeometries([S(-0.085, 0.04, 0.205, 0.03, 0.035, 0.03), S(0.085, 0.04, 0.205, 0.03, 0.035, 0.03), S(0, -0.02, 0.245, 0.032, 0.025, 0.025)]),
-    leg: mergeGeometries([shapeGeo(cyl, 0, -0.27, 0, 0.12, 0.54, 0.12), S(0, -0.58, 0.05, 0.14, 0.13, 0.19)]),
+    cyl, body, head, earInner, face, belly, mushrooms, hand,
+    bodyHull: hullOf(body, 0.014),
+    headHull: hullOf(head, 0.012),
+    handHull: hullOf(hand, 0.01),
   };
 })();
-const darkMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1f });
+
+const hullMat = new THREE.MeshBasicMaterial({ color: 0x101010, side: THREE.BackSide });
+const tanMat = new THREE.MeshLambertMaterial({ color: TAN });
+const mushMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+const faceMatHappy = new THREE.MeshLambertMaterial({ map: makeFaceTexture(false), alphaTest: 0.4 });
+const faceMatScared = new THREE.MeshLambertMaterial({ map: makeFaceTexture(true), alphaTest: 0.4 });
+
+function makePaw() {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(MK.hand, tanMat), new THREE.Mesh(MK.handHull, hullMat));
+  return g;
+}
+
+function makeArm(mat) {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(MK.cyl, mat), new THREE.Mesh(MK.cyl, hullMat)); // fur + black outline
+  return g;
+}
 
 function makePlushie(hex) {
-  const main = new THREE.MeshLambertMaterial({ color: hex });
-  const accent = new THREE.MeshLambertMaterial({ color: hex });
+  const main = new THREE.MeshLambertMaterial({ color: hex }); // the fur (recolorable)
   const g = new THREE.Group();
   const add = (geo, mat, parent) => { const m = new THREE.Mesh(geo, mat); parent.add(m); return m; };
 
-  add(PL.torso, main, g);
-  add(PL.bodyAccent, accent, g);
+  add(MK.body, main, g);
+  add(MK.bodyHull, hullMat, g);
+  add(MK.belly, tanMat, g);
+  add(MK.mushrooms, mushMat, g);
 
   const headG = new THREE.Group();
   headG.position.set(0, E0, 0);
   g.add(headG);
-  // head geometry was modelled around (0,0,0), so it sits at the head pivot
-  add(PL.headMain, main, headG);
-  add(PL.headAccent, accent, headG);
-  add(PL.headDark, darkMat, headG);
+  add(MK.head, main, headG);
+  add(MK.headHull, hullMat, headG);
+  add(MK.earInner, tanMat, headG);
+  const face = add(MK.face, faceMatHappy, headG);
 
-  const legs = [-1, 1].map((sx) => {
-    const pivot = new THREE.Group();
-    pivot.position.set(sx * 0.16, 0.72, 0.02);
-    g.add(pivot);
-    add(PL.leg, main, pivot);
-    return pivot;
-  });
-
-  // stretchy stuffed arms: a cylinder (stretched every frame) + a round paw
-  const armL = add(PL.cyl, main, g);
-  const armR = add(PL.cyl, main, g);
-  const pawL = add(shapeGeo(PL.sph, 0, 0, 0, 0.1, 0.1, 0.1), accent, g);
-  const pawR = add(shapeGeo(PL.sph, 0, 0, 0, 0.1, 0.1, 0.1), accent, g);
+  const armL = makeArm(main);
+  const armR = makeArm(main);
+  const handL = makePaw();
+  const handR = makePaw();
+  g.add(armL, armR, handL, handR);
 
   scene.add(g);
   return {
-    group: g, headG, legL: legs[0], legR: legs[1], armL, armR, pawL, pawR, main, accent,
-    shoulderL: new THREE.Vector3(-0.32, 1.2, 0),
-    shoulderR: new THREE.Vector3(0.32, 1.2, 0),
+    group: g, headG, face, scared: false, armL, armR, handL, handR, main,
+    shoulderL: new THREE.Vector3(-0.30, 1.22, 0.02),
+    shoulderR: new THREE.Vector3(0.30, 1.22, 0.02),
   };
 }
 
 function setPlushieColor(pl, hex, infected) {
-  const c = infected ? INFECTED_COLOR : hex;
-  pl.main.color.set(c);
-  pl.accent.color.set(c).lerp(WHITE, infected ? 0.25 : 0.5);
-  const em = infected ? 0x661100 : 0x000000;
-  pl.main.emissive.set(em);
-  pl.accent.emissive.set(em);
+  pl.main.color.set(infected ? INFECTED_COLOR : hex);
+  pl.main.emissive.set(infected ? 0x661100 : 0x000000);
+}
+
+function setFace(pl, scared) {
+  if (pl.scared === scared) return;
+  pl.scared = scared;
+  pl.face.material = scared ? faceMatScared : faceMatHappy;
 }
 
 const _ax = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
-// stretch a unit cylinder so it runs from `from` to `to`
-function setArm(mesh, from, to) {
+// stretch an arm so it runs from `from` to `to`
+function setArm(arm, from, to) {
   _ax.set(to.x - from.x, to.y - from.y, to.z - from.z);
   const len = _ax.length() || 0.001;
-  mesh.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
-  mesh.scale.set(0.075, len, 0.075);
+  arm.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
   _ax.divideScalar(len);
-  mesh.quaternion.setFromUnitVectors(_up, _ax);
+  arm.quaternion.setFromUnitVectors(_up, _ax);
+  arm.children[0].scale.set(0.075, len, 0.075);
+  arm.children[1].scale.set(0.075 + HULL_T, len + 2 * HULL_T, 0.075 + HULL_T);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Gorilla Tag style locomotion (now works on every surface)          */
+/*  Gorilla Tag style locomotion (works on every surface)              */
 /*                                                                     */
 /*  - A hand "touches" when its sphere dips into any collider.         */
 /*  - While touching, the body moves opposite to the hand's motion.    */
@@ -907,7 +1118,7 @@ function handleInput() {
 /* ================================================================== */
 
 /* ---------- Entities: you + bots ---------- */
-const BOT_TAG_Y = [0.35, 0.8, 1.25]; // heights of a bot's tag spheres (model units)
+const BOT_TAG_Y = [0.2, 0.85, 1.45]; // heights of a bot's tag spheres (model units)
 const BOT_NAMES = ['Waffles', 'Pickle', 'Noodle', 'Biscuit', 'Muffin', 'Turnip', 'Pancake', 'Doodle', 'Nugget'];
 
 // Bots are scaled so their eye level matches yours
@@ -992,19 +1203,27 @@ function makeBot(i) {
 const bots = Array.from({ length: CFG.botCount }, (_, i) => makeBot(i));
 const entities = [player, ...bots];
 
-/* ---------- Your plushie body + the color-station statue ---------- */
+/* ---------- Your monkey body + the color-station statue ---------- */
 const playerAvatar = makePlushie(PALETTE[playerColorIdx].hex);
 playerAvatar.headG.visible = false; // you can't see your own head (it would block your view)
-playerAvatar.pawL.visible = false;  // your real paws are the hand spheres
-playerAvatar.pawR.visible = false;
+playerAvatar.handL.visible = false; // your real paws are the hand models below
+playerAvatar.handR.visible = false;
 playerAvatar.group.visible = false;
+
+// the visible paws that follow your controllers
+for (const h of hands) {
+  h.model = makePaw();
+  h.model.visible = h.active;
+  scene.add(h.model);
+}
 
 const statue = makePlushie(PALETTE[playerColorIdx].hex);
 statue.group.position.set(STATION.x, 0.5, STATION.z);
-statue.pawL.position.set(-0.42, 0.7, 0);
-statue.pawR.position.set(0.42, 0.7, 0);
-setArm(statue.armL, statue.shoulderL, statue.pawL.position);
-setArm(statue.armR, statue.shoulderR, statue.pawR.position);
+statue.handL.position.set(-0.42, 0.06, 0.1);
+statue.handR.position.set(0.42, 0.06, 0.1);
+setArm(statue.armL, statue.shoulderL, statue.handL.position);
+setArm(statue.armR, statue.shoulderR, statue.handR.position);
+let statueT = 0;
 
 /* ---------- Game state ---------- */
 let state = 'idle'; // 'idle' | 'running' | 'intermission'
@@ -1035,10 +1254,6 @@ function infectedCount() {
 /* ---------- Visuals ---------- */
 function applyPlayerVisual() {
   const hex = PALETTE[playerColorIdx].hex;
-  for (const h of hands) {
-    h.mesh.material.color.set(player.infected ? INFECTED_COLOR : hex);
-    h.mesh.material.emissive.set(player.infected ? 0x661100 : 0x000000);
-  }
   setPlushieColor(playerAvatar, hex, player.infected);
   setPlushieColor(statue, hex, false);
   tint.material.opacity = player.infected && renderer.xr.isPresenting ? 0.18 : 0;
@@ -1072,20 +1287,17 @@ function animateBot(bot, dt) {
 
   if (speed > 0.3) bot.facing = lerpAngle(bot.facing, Math.atan2(bot.vel.x, bot.vel.z), 1 - Math.exp(-10 * dt));
 
+  // knuckle-walking: hands alternate, lifting while they swing forward
   const pl = bot.pl;
-  const swing = Math.sin(bot.phase);
-  pl.legL.rotation.x = swing * 0.9 * amount;
-  pl.legR.rotation.x = -swing * 0.9 * amount;
-
-  const handY = 0.6 - 0.4 * amount;
-  _bA.set(-0.45, handY + Math.max(0, -swing) * 0.2 * amount, -swing * 0.45 * amount);
-  pl.pawL.position.copy(_bA);
+  const s = Math.sin(bot.phase), c = Math.cos(bot.phase);
+  _bA.set(-0.42, 0.06 + Math.max(0, c) * 0.3 * amount, 0.1 + s * 0.5 * amount);
+  pl.handL.position.copy(_bA);
   setArm(pl.armL, pl.shoulderL, _bA);
-  _bA.set(0.45, handY + Math.max(0, swing) * 0.2 * amount, swing * 0.45 * amount);
-  pl.pawR.position.copy(_bA);
+  _bA.set(0.42, 0.06 + Math.max(0, -c) * 0.3 * amount, 0.1 - s * 0.5 * amount);
+  pl.handR.position.copy(_bA);
   setArm(pl.armR, pl.shoulderR, _bA);
 
-  bot.group.position.set(bot.pos.x, Math.abs(Math.sin(bot.phase)) * 0.06 * amount * botScale, bot.pos.z);
+  bot.group.position.set(bot.pos.x, Math.abs(s) * 0.05 * amount * botScale, bot.pos.z);
   bot.group.rotation.y = bot.facing;
   // freshly infected / waiting bots pulse so you can see they're about to go
   const pulse = bot.stun > 0 ? 1 + 0.05 * Math.sin(performance.now() / 60) : 1;
@@ -1102,7 +1314,7 @@ function updateTags(dt, time) {
     const inf = bot.infected;
     const pulse = inf ? 1 + 0.06 * Math.sin(time * 7 + t.phase) : 1 + 0.015 * Math.sin(time * 2 + t.phase);
     const bob = Math.sin(time * 2.2 + t.phase) * 0.05 * botScale;
-    t.sprite.position.set(bot.pos.x, (1.77 + 0.4) * botScale + bob, bot.pos.z);
+    t.sprite.position.set(bot.pos.x, 2.25 * botScale + bob, bot.pos.z);
     const sc = ds * pop * pulse;
     t.sprite.scale.set(1.5 * sc, 0.375 * sc, 1);
     t.sprite.material.rotation = Math.sin(time * (inf ? 9 : 2.5) + t.phase) * (inf ? 0.07 : 0.025);
@@ -1149,6 +1361,12 @@ function updateAvatar(dt) {
   const cs = Math.cos(avatarYaw), sn = Math.sin(avatarYaw);
   pl.armL.visible = pl.armR.visible = false;
   for (const h of hands) {
+    if (h.model) {
+      h.model.visible = h.active;
+      h.model.position.copy(h.mesh.position);
+      h.model.rotation.y = avatarYaw;
+      h.model.scale.setScalar(sc);
+    }
     if (!h.active) continue;
     const isLeft = h.source && h.source.handedness === 'left';
     const arm = isLeft ? pl.armL : pl.armR;
@@ -1162,6 +1380,8 @@ function updateAvatar(dt) {
 let padCooldown = 0;
 function updateStation(dt) {
   statue.group.rotation.y += dt * 0.6;
+  statueT += dt;
+  setFace(statue, Math.floor(statueT / 3) % 2 === 1); // the statue alternates between both faces
   statue.group.scale.setScalar(botScale);
   padCooldown -= dt;
   if (padCooldown > 0) return;
@@ -1496,6 +1716,26 @@ function separateBots() {
   }
 }
 
+/* ---------- Spotted: healthy players look scared when a tagger sees them ---------- */
+let spotT = 0;
+function updateSpotted(dt) {
+  spotT -= dt;
+  if (spotT > 0) return;
+  spotT = 0.2; // check 5 times a second
+  for (const e of entities) {
+    let spotted = false;
+    if (state === 'running' && !e.infected) {
+      for (const t of entities) {
+        if (t === e || !t.infected) continue;
+        const d = Math.hypot(t.pos.x - e.pos.x, t.pos.z - e.pos.z);
+        if (d < CFG.spotRange && !sightBlocked(t.pos.x, t.pos.z, e.pos.x, e.pos.z)) { spotted = true; break; }
+      }
+    }
+    e.spotted = spotted;
+    setFace(e.isPlayer ? playerAvatar : e.pl, spotted);
+  }
+}
+
 /* ---------- Per-frame game update ---------- */
 function updateHud() {
   let main = '';
@@ -1538,6 +1778,7 @@ function updateGame(dt) {
   }
   separateBots();
   for (const bot of bots) animateBot(bot, dt);
+  updateSpotted(dt);
 
   if (state === 'running') {
     updatePlayerPoints();
