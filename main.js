@@ -906,9 +906,15 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = THREE.MathUtils.clamp(clock.getDelta(), 1 / 240, 0.05);
   if (renderer.xr.isPresenting) {
-    handleInput();
-    updateLocomotion(dt);
-    updateGame(dt);
+    try {
+      handleInput();
+      updateLocomotion(dt);
+      updateGame(dt);
+    } catch (err) {
+      // No console in the headset, so show the error on the HUD instead
+      console.error(err);
+      drawHud('ERROR: ' + String((err && err.message) || err), '#ff5a3c', 'Tell Claude what this says');
+    }
   }
   renderer.render(scene, camera);
 });
