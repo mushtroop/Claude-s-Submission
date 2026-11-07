@@ -31,7 +31,32 @@
     <p>Push off surfaces with your hands to move. Swing your arms, let go to launch.</p>
     <p>Infection mode: you + 9 bots. Don't get tagged!</p>
     <p><b>A / X</b> = change plushie color &nbsp; <b>B / Y</b> = reset &nbsp; <b>Right stick</b> = turn</p>
+    <hr style="border:0;border-top:1px solid #888;margin:10px 0">
   </div>
-  <script type="module" src="./main.js?v=3"></script>
+
+  <script type="module">
+    const info = document.getElementById('info');
+    const say = (text, color) => {
+      const p = document.createElement('p');
+      p.textContent = text;
+      if (color) p.style.color = color;
+      info.appendChild(p);
+    };
+    say('index.html: v4 OK');
+
+    // Self-check: is the main.js on the server the forest version?
+    fetch('./main.js?t=' + Date.now())
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error('main.js not found (HTTP ' + r.status + ')'))))
+      .then((t) => {
+        if (t.includes('buildWorld')) say('main.js: forest version found', '#9dff9d');
+        else say('main.js is the OLD version - upload the new main.js', '#ffb347');
+      })
+      .catch((e) => say('Could not read main.js: ' + e.message, '#ff8a80'));
+
+    // Load the game with a fresh timestamp every time (no more stale cache)
+    import('./main.js?t=' + Date.now())
+      .then(() => say('Game script loaded OK', '#9dff9d'))
+      .catch((err) => say('LOAD ERROR: ' + (err && err.message ? err.message : err), '#ff8a80'));
+  </script>
 </body>
 </html>
