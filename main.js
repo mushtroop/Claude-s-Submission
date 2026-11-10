@@ -27,7 +27,7 @@ const CFG = {
   headRadius: 0.2,
   chestRadius: 0.22,
   chestDrop: 0.5,        // chest sits this far below your head
-  standOnFeet: true,     // true = you stand at your real height (like real Gorilla Tag).
+  standOnFeet: false,     // true = you stand at your real height (like real Gorilla Tag).
                          // false = old behaviour: you sink until your hands touch the ground
   feetRadius: 0.18,      // size of the invisible "feet" that hold you up
   armScale: 1.6,         // your virtual arms are this much longer than your real ones, so your
