@@ -30,6 +30,9 @@ const CFG = {
   standOnFeet: true,     // true = you stand at your real height (like real Gorilla Tag).
                          // false = old behaviour: you sink until your hands touch the ground
   feetRadius: 0.18,      // size of the invisible "feet" that hold you up
+  armScale: 1.6,         // your virtual arms are this much longer than your real ones, so your
+                         // hands reach the ground without a deep crouch (1.0 = real arm length)
+  shoulderDrop: 0.2,     // arms stretch out from a point this far below your head
 
   // --- infection game ---
   botCount: 9,           // AI bots (you + 9 = 10 players)
@@ -45,6 +48,7 @@ const CFG = {
   startGrace: 3,         // seconds the first infected bot stands still
   infectStun: 0.6,       // seconds a freshly infected bot freezes
   intermission: 6,       // seconds between rounds
+  roundTime: 120,        // a round ends after this many seconds; whoever is still healthy survives
   botSizeBoost: 1.0,     // 1.0 = bots' eye level matches yours; 1.1 = 10% taller
 };
 
@@ -586,6 +590,7 @@ const hands = [0, 1].map((i) => {
     touching: false,
     hasPrev: false,
     model: null, // the visible paw (created further down)
+    vlocal: new THREE.Vector3(), // where your (stretched) hand is, in tracking space
     prevLocal: new THREE.Vector3(),
   };
 
@@ -683,13 +688,78 @@ function drawHud(main, mainColor, sub) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Monkey model: orange fur, tan face / belly / hands, black outlines, */
-/*  a curly tail and mushroom spikes on its back. No legs - it stands   */
-/*  on its long arms. Used by you, the bots and the statue.             */
+/*  Monkey model, built to match your drawing: orange fur, tan face,   */
+/*  belly and hands, thick black outlines, spiky cheek fur, a curly    */
+/*  tail and mushroom spikes on the back. No legs - it stands on its   */
+/*  long arms. Used by you, the bots and the statue.                   */
 /* ------------------------------------------------------------------ */
-const E0 = 1.55;       // eye (head centre) height of the model, in model units
+const MODEL_TOP = 1.78;     // top of the head, in model units
+const EYE_M = 1.36;         // eye height inside the model
 const TAN = 0xc9a46e;
-const HULL_T = 0.012;  // outline thickness
+const HULL_T = 0.012;       // outline thickness
+const ARM_R = 0.095;        // arm thickness
+const HAND_SPLAY = 0.6;     // how far the hands turn outward
+const PK = MODEL_TOP / 335; // metres per pixel of your drawing
+
+// turn a point on the zoomed face crop of your drawing (3x zoom) into model metres
+const FC = (cx, cy) => [((190 + cx / 3) - 289) * PK, (495 - (130 + cy / 3)) * PK];
+
+// ---- shapes, as plain numbers ----
+// the torso is a surface of revolution too: wide shoulders tapering to a rounded bottom (like your drawing)
+const TORSO_RX = 0.30, TORSO_RZ = 0.21;
+const TORSO_PROFILE = [[0.40, 0.0], [0.42, 0.45], [0.48, 0.6], [0.58, 0.7], [0.70, 0.8], [0.82, 0.9], [0.95, 0.97],
+  [1.05, 1.0], [1.12, 0.9], [1.18, 0.6], [1.22, 0.0]];
+function profileR(table, y) {
+  if (y <= table[0][0]) return table[0][1];
+  for (let i = 1; i < table.length; i++) {
+    if (y <= table[i][0]) { const f = (y - table[i - 1][0]) / (table[i][0] - table[i - 1][0]); return table[i - 1][1] + (table[i][1] - table[i - 1][1]) * f; }
+  }
+  return 0;
+}
+const torsoR = (y) => profileR(TORSO_PROFILE, y);
+// the thick tail leaves the lower back, sweeps out to the side and curls up
+const TAIL_PATH = [[0, 0.52, -0.18], [-0.14, 0.5, -0.32], [-0.3, 0.52, -0.42], [-0.48, 0.57, -0.47], [-0.66, 0.65, -0.47],
+  [-0.8, 0.78, -0.42], [-0.88, 0.93, -0.35], [-0.9, 1.06, -0.28]];
+const TAIL_R = 0.105;
+const SHOULDER_SHAPES = [[-0.27, 1.02, 0, 0.15, 0.15, 0.14], [0.27, 1.02, 0, 0.15, 0.15, 0.14]]; // [x, y, z, radiusX, radiusY, radiusZ]
+
+const HEAD_Y = 1.40; // head centre; the head shapes below are relative to it
+const HEAD_RX = 0.345, HEAD_RZ = 0.30;
+// the head is a surface of revolution; this table is its outline: [height, width (1 = widest)]
+// (wide jaw, round dome - like your drawing, not an egg)
+const HEAD_PROFILE = [[0.99, 0.0], [1.0, 0.22], [1.03, 0.5], [1.07, 0.66], [1.11, 0.75], [1.18, 0.84], [1.26, 0.92], [1.36, 0.98],
+  [1.46, 1.0], [1.56, 0.96], [1.64, 0.82], [1.71, 0.6], [1.76, 0.33], [1.78, 0.0]];
+const headR = (y) => profileR(HEAD_PROFILE, y);
+const EAR_SHAPES = [[-0.355, 0.02, 0, 0.045, 0.09, 0.035], [0.355, 0.02, 0, 0.045, 0.09, 0.035]];
+// spiky fur: [radius, length, rotation, x, y] (a cone starts at its base and points along its rotation)
+const HEAD_CONES = [
+  [0.05, 0.17, -Math.PI / 2 + 0.4, 0.31, -0.05], [0.05, 0.17, -Math.PI / 2 - 0.4, 0.31, -0.2],  // cheek fur, right side
+  [0.05, 0.17, Math.PI / 2 - 0.4, -0.31, -0.05], [0.05, 0.17, Math.PI / 2 + 0.4, -0.31, -0.2],  // cheek fur, left side
+  [0.03, 0.17, -1.0, 0.0, 0.36], [0.03, 0.17, -1.2, 0.08, 0.35], [0.03, 0.17, -1.4, 0.16, 0.33], // hair tuft, leaning right
+];
+
+// mushroom spikes on the back and back of the head: [x, y, z, directionX, directionY, directionZ, size]
+const MUSHROOMS = [
+  [0.0, 1.04, -0.14, 0, 0.55, -0.83, 1.0], [-0.16, 0.95, -0.13, -0.5, 0.3, -0.8, 0.9], [0.16, 0.95, -0.13, 0.5, 0.3, -0.8, 1.0],
+  [0.0, 0.82, -0.205, 0, 0.15, -0.99, 1.2], [-0.16, 0.66, -0.14, -0.45, 0.05, -0.9, 0.85], [0.16, 0.64, -0.14, 0.45, 0.05, -0.9, 0.95],
+  [-0.1, 1.62, -0.23, -0.35, 0.6, -0.72, 0.9], [0.12, 1.66, -0.19, 0.35, 0.65, -0.68, 0.8], [0.0, 1.74, -0.12, 0, 0.9, -0.4, 0.7],
+];
+
+// ---- the flat painted parts: the face and the belly are decals wrapped around the body ----
+const FACE = { lathe: true, R: headR, rx: HEAD_RX * 1.02, rz: HEAD_RZ * 1.02, y0: 0.99, y1: 1.64, dphi: 2.8, W: 640, H: 432 };
+const BELLY = { lathe: true, R: torsoR, rx: TORSO_RX * 1.02, rz: TORSO_RZ * 1.02, y0: 0.44, y1: 0.98, dphi: 2.3, W: 560, H: 420 };
+
+// every point below was read off your drawing (zoomed face crop coordinates)
+const P = (list) => list.map(([a, b]) => FC(a, b));
+const FACE_OUTLINE = P([[148, 300], [165, 252], [205, 218], [240, 199], [270, 203], [297, 214], [325, 203], [358, 199], [395, 215], [435, 248],
+  [453, 300], [458, 370], [452, 430], [430, 480], [390, 512], [340, 526], [300, 528], [255, 523], [210, 505], [170, 470], [145, 420], [137, 370]]);
+const FACE_EYES = [[241, 326, 26, 64], [354, 326, 26, 62]].map(([a, b, rx, ry]) => ({ c: FC(a, b), rx: rx / 3 * PK, ry: ry / 3 * PK }));
+const NOSTRILS = [P([[270, 405], [287, 412]]), P([[308, 405], [322, 414]])];
+const HAPPY_MOUTH = P([[205, 457], [218, 445], [250, 438], [290, 438], [320, 448], [318, 462], [300, 480], [270, 495], [240, 497], [215, 485], [205, 470]]);
+const HAPPY_DASH = P([[205, 389], [230, 388], [257, 382]]);          // the little line under the left eye
+const SCARED_ARCS = [P([[216, 345], [203, 368], [214, 396]]), P([[383, 345], [396, 368], [385, 396]])]; // worry lines
+const SCARED_MOUTH = P([[240, 490], [265, 478], [300, 483], [335, 476], [360, 490]]);
+const BELLY_OVAL = { cy: (495 - 361) * PK, rx: 36 * PK, ry: 37 * PK };
 
 function shapeGeo(base, x, y, z, sx, sy, sz) {
   const g = base.clone();
@@ -708,85 +778,147 @@ function hullOf(geo, t) {
   return g;
 }
 
-// The two faces from your drawings, painted on a canvas
-function makeFaceTexture(scared) {
-  const c = document.createElement('canvas');
-  c.width = 384;
-  c.height = 256;
-  const x = c.getContext('2d');
-  // tan face shape with a thick black outline
-  x.fillStyle = '#c9a46e';
-  x.strokeStyle = '#111111';
-  x.lineWidth = 12;
-  x.beginPath();
-  x.ellipse(192, 128, 178, 118, 0, 0, Math.PI * 2);
-  x.fill();
-  x.stroke();
-  x.fillStyle = '#111111';
-  x.strokeStyle = '#111111';
-  x.lineCap = 'round';
-
-  if (!scared) {
-    // happy: one open eye, one winking eye, open smile
-    x.beginPath(); x.ellipse(128, 112, 17, 29, 0, 0, Math.PI * 2); x.fill();
-    x.lineWidth = 10;
-    x.beginPath(); x.arc(256, 132, 20, Math.PI * 1.1, Math.PI * 1.9); x.stroke();
-    x.beginPath();
-    x.moveTo(154, 186);
-    x.quadraticCurveTo(192, 246, 230, 186);
-    x.closePath();
-    x.fill();
-    x.fillStyle = '#d2875f'; // tongue
-    x.beginPath(); x.ellipse(192, 212, 19, 9, 0, 0, Math.PI * 2); x.fill();
-  } else {
-    // scared (spotted by a tagger): big shiny eyes and a little frown
-    x.beginPath(); x.ellipse(128, 112, 19, 31, 0, 0, Math.PI * 2); x.fill();
-    x.beginPath(); x.ellipse(256, 112, 19, 31, 0, 0, Math.PI * 2); x.fill();
-    x.fillStyle = '#ffffff';
-    x.beginPath(); x.arc(121, 99, 6, 0, Math.PI * 2); x.fill();
-    x.beginPath(); x.arc(249, 99, 6, 0, Math.PI * 2); x.fill();
-    x.strokeStyle = '#111111';
-    x.lineWidth = 9;
-    x.beginPath(); x.arc(192, 228, 30, Math.PI * 1.2, Math.PI * 1.8); x.stroke();
+// smooth curve through points (Catmull-Rom)
+function spline(pts, closed, per = 8) {
+  const n = pts.length;
+  const get = (i) => (closed ? pts[(i + n) % n] : pts[Math.max(0, Math.min(n - 1, i))]);
+  const out = [];
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = get(i - 1), p1 = get(i), p2 = get(i + 1), p3 = get(i + 2);
+    for (let t = 0; t < per; t++) {
+      const u = t / per, u2 = u * u, u3 = u2 * u;
+      const f = (k) => 0.5 * ((2 * p1[k]) + (-p0[k] + p2[k]) * u + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * u2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * u3);
+      out.push([f(0), f(1)]);
+    }
   }
-  // nostrils
-  x.fillStyle = '#111111';
-  x.beginPath(); x.arc(178, 158, 4, 0, Math.PI * 2); x.fill();
-  x.beginPath(); x.arc(206, 158, 4, 0, Math.PI * 2); x.fill();
+  if (!closed) out.push(pts[n - 1]);
+  return out;
+}
 
+function ellipsePts(cx, cy, rx, ry, n = 28) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    out.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]);
+  }
+  return out;
+}
+
+// Where does a point on the front of the body (X right, Y up, in metres) land on a decal's canvas?
+// These are the inverse of how three.js lays a texture over a patch of surface.
+function decalMapper(spec) {
+  return (X, Y) => {
+    const r = Math.max(spec.rx * spec.R(Y), 1e-4);
+    const a = Math.asin(Math.max(-1, Math.min(1, X / r)));
+    return [(0.5 + a / spec.dphi) * spec.W, (1 - (Y - spec.y0) / (spec.y1 - spec.y0)) * spec.H];
+  };
+}
+
+// paint a decal: you draw in metres, it takes care of the wrapping
+function makeDecal(spec, draw) {
+  const c = document.createElement('canvas');
+  c.width = spec.W;
+  c.height = spec.H;
+  const x = c.getContext('2d');
+  const map = decalMapper(spec);
+  const pxm = spec.W / (spec.rx * spec.dphi); // pixels per metre (across the middle of the face)
+  const path = (pts, close) => {
+    x.beginPath();
+    pts.forEach(([X, Y], i) => { const [u, v] = map(X, Y); if (i) x.lineTo(u, v); else x.moveTo(u, v); });
+    if (close) x.closePath();
+  };
+  x.lineJoin = 'round';
+  x.lineCap = 'round';
+  draw(x, path, pxm);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+}
+
+// The two faces from your drawings
+function makeFaceTexture(scared) {
+  return makeDecal(FACE, (x, path, pxm) => {
+    path(spline(FACE_OUTLINE, true), true);               // the tan face with its black outline
+    x.fillStyle = '#c9a46e';
+    x.fill();
+    x.lineWidth = 0.016 * pxm;
+    x.strokeStyle = '#111111';
+    x.stroke();
+    x.fillStyle = '#111111';
+    for (const e of FACE_EYES) { path(ellipsePts(e.c[0], e.c[1], e.rx, e.ry), true); x.fill(); } // tall oval eyes
+    x.lineWidth = 0.014 * pxm;
+    for (const n of NOSTRILS) { path(n, false); x.stroke(); }
+    if (!scared) {
+      path(spline(HAPPY_MOUTH, true), true);              // open smile, a little off to one side
+      x.fill();
+      path(spline(HAPPY_DASH, false), false);
+      x.stroke();
+    } else {
+      for (const a of SCARED_ARCS) { path(spline(a, false), false); x.stroke(); } // worry lines by the eyes
+      x.lineWidth = 0.02 * pxm;
+      path(spline(SCARED_MOUTH, false), false);           // flat, wobbly mouth
+      x.stroke();
+    }
+  });
+}
+
+function makeBellyTexture() {
+  return makeDecal(BELLY, (x, path, pxm) => {
+    path(ellipsePts(0, BELLY_OVAL.cy, BELLY_OVAL.rx, BELLY_OVAL.ry, 40), true);
+    x.fillStyle = '#c9a46e';
+    x.fill();
+    x.lineWidth = 0.02 * pxm;
+    x.strokeStyle = '#111111';
+    x.stroke();
+  });
 }
 
 const MK = (() => {
   const sph = new THREE.SphereGeometry(1, 20, 14);
   const cyl = new THREE.CylinderGeometry(1, 1, 1, 14);
   const S = (x, y, z, sx, sy, sz) => shapeGeo(sph, x, y, z, sx, sy, sz);
-
-  // body: torso + shoulders + a curly tail
-  const tail = [[0, 0.76, -0.2, 0.09], [0.12, 0.72, -0.32, 0.085], [0.26, 0.73, -0.4, 0.08],
-    [0.4, 0.8, -0.43, 0.075], [0.5, 0.92, -0.4, 0.07], [0.55, 1.05, -0.34, 0.065]].map(([x, y, z, r]) => S(x, y, z, r, r, r));
-  const body = mergeGeometries([S(0, 1.0, 0, 0.27, 0.35, 0.2), S(-0.26, 1.22, 0.01, 0.13, 0.13, 0.13), S(0.26, 1.22, 0.01, 0.13, 0.13, 0.13), ...tail]);
-
-  // head (around its own pivot): head + ears + a spiky tuft of hair
-  const tuft = [[-0.03, 0.3], [0.03, -0.1], [0.09, -0.5]].map(([x, lean]) => {
-    const g = new THREE.ConeGeometry(0.035, 0.17, 6);
-    g.translate(0, 0.085, 0);
-    g.rotateZ(lean);
-    g.translate(x, 0.235, 0);
+  const cone = (r, h, rot, x, y) => {
+    const g = new THREE.ConeGeometry(r, h, 7);
+    g.translate(0, h / 2, 0);
+    g.rotateZ(rot);
+    g.translate(x, y, 0);
     return g;
-  });
-  const head = mergeGeometries([S(0, 0, 0, 0.28, 0.25, 0.25), S(-0.27, 0.03, -0.02, 0.07, 0.09, 0.045), S(0.27, 0.03, -0.02, 0.07, 0.09, 0.045), ...tuft]);
-  const earInner = mergeGeometries([S(-0.27, 0.03, 0.012, 0.045, 0.06, 0.03), S(0.27, 0.03, 0.012, 0.045, 0.06, 0.03)]);
+  };
 
-  // the face is a curved patch that hugs the front of the head
-  const face = new THREE.SphereGeometry(1, 28, 20, Math.PI / 2 - 0.95, 1.9, Math.PI / 2 - 0.75, 1.5);
-  face.scale(0.28 * 1.012, 0.25 * 1.012, 0.25 * 1.012);
+  // a surface of revolution from an outline table (bottom to top), squashed to an oval cross-section
+  const lathe = (R, y0, y1, n, rScale, rx, rz, yOff, segments, phiStart, phiLength) => {
+    const pts = [];
+    for (let j = 0; j < n; j++) {
+      const y = y0 + ((y1 - y0) * j) / (n - 1);
+      pts.push(new THREE.Vector2(R(y) * rScale, y - yOff));
+    }
+    const g = new THREE.LatheGeometry(pts, segments, phiStart, phiLength);
+    g.scale(rx, 1, rz);
+    return g;
+  };
+  const headLathe = (y0, y1, n, rScale, segments, phiStart, phiLength) =>
+    lathe(headR, y0, y1, n, rScale, HEAD_RX, HEAD_RZ, HEAD_Y, segments, phiStart, phiLength);
 
-  const belly = S(0, 0.98, 0.13, 0.17, 0.21, 0.1);
+  // body = tapered torso + shoulders + one smooth swept tail with round ends
+  const tailCurve = new THREE.CatmullRomCurve3(TAIL_PATH.map(([x, y, z]) => new THREE.Vector3(x, y, z)));
+  const tailEnds = [TAIL_PATH[0], TAIL_PATH[TAIL_PATH.length - 1]].map(([x, y, z]) => S(x, y, z, TAIL_R, TAIL_R, TAIL_R));
+  const body = mergeGeometries([
+    lathe(torsoR, TORSO_PROFILE[0][0], TORSO_PROFILE[TORSO_PROFILE.length - 1][0], 30, 1, TORSO_RX, TORSO_RZ, 0, 32, 0, Math.PI * 2),
+    ...SHOULDER_SHAPES.map((b) => S(...b)),
+    new THREE.TubeGeometry(tailCurve, 36, TAIL_R, 10, false),
+    ...tailEnds,
+  ]);
+  const headCore = () => headLathe(HEAD_PROFILE[0][0], HEAD_PROFILE[HEAD_PROFILE.length - 1][0], 30, 1, 32, 0, Math.PI * 2);
+  const head = mergeGeometries([headCore(), ...HEAD_CONES.map((c) => cone(...c))]);
+  const ears = mergeGeometries(EAR_SHAPES.map((e) => S(...e)));
+  const headHull = hullOf(mergeGeometries([head, ...EAR_SHAPES.map((e) => S(...e))]), 0.012);
 
-  // mushroom spikes: cream stem + red cap with white spots, colored with vertex colors
+  // face and belly: patches of sphere hugging the head / torso
+  const face = headLathe(FACE.y0, FACE.y1, 26, 1.02, 36, -FACE.dphi / 2, FACE.dphi);
+  const belly = lathe(torsoR, BELLY.y0, BELLY.y1, 22, 1.02, TORSO_RX, TORSO_RZ, 0, 32, -BELLY.dphi / 2, BELLY.dphi);
+
+  // mushroom spikes: cream stem + dark red cap with white spots (vertex colors)
   const UPV = new THREE.Vector3(0, 1, 0);
   const colored = (g, r, gr, b) => {
     const n = g.attributes.position.count;
@@ -795,14 +927,14 @@ const MK = (() => {
     g.setAttribute('color', new THREE.BufferAttribute(a, 3));
     return g;
   };
-  const mushroom = (px, py, pz, dx, dy, dz, sc) => {
-    const stem = new THREE.CylinderGeometry(0.018, 0.026, 0.15, 8);
-    stem.translate(0, 0.075, 0);
+  const mushroom = ([px, py, pz, dx, dy, dz, sc]) => {
+    const stem = new THREE.CylinderGeometry(0.022, 0.03, 0.14, 8);
+    stem.translate(0, 0.07, 0);
     const parts = [
-      colored(stem, 0.93, 0.88, 0.75),
-      colored(shapeGeo(sph, 0, 0.16, 0, 0.075, 0.042, 0.075), 0.8, 0.15, 0.15),
-      ...[[0, 0.202, 0], [0.04, 0.1937, 0.02], [-0.035, 0.193, 0.03], [0, 0.1936, -0.045]]
-        .map(([x, y, z]) => colored(shapeGeo(sph, x, y, z, 0.018, 0.008, 0.018), 1, 1, 1)),
+      colored(stem, 0.85, 0.74, 0.6),
+      colored(shapeGeo(sph, 0, 0.15, 0, 0.092, 0.05, 0.092), 0.62, 0.12, 0.13),
+      ...[[0, 0.2, 0], [0.05, 0.1887, 0.03], [-0.045, 0.1878, 0.04], [0.01, 0.1875, -0.06]]
+        .map(([x, y, z]) => colored(shapeGeo(sph, x, y, z, 0.028, 0.01, 0.028), 1, 1, 1)),
     ];
     const g = mergeGeometries(parts);
     g.scale(sc, sc, sc);
@@ -810,41 +942,33 @@ const MK = (() => {
     g.translate(px, py, pz);
     return g;
   };
-  const mushrooms = mergeGeometries([
-    mushroom(0.0, 1.30, -0.16, 0, 0.55, -0.83, 1.0),
-    mushroom(-0.14, 1.20, -0.16, -0.3, 0.35, -0.88, 0.85),
-    mushroom(0.15, 1.18, -0.16, 0.3, 0.35, -0.88, 1.1),
-    mushroom(0.0, 1.05, -0.19, 0, 0.2, -0.98, 1.25),
-    mushroom(-0.12, 0.92, -0.17, -0.25, 0.1, -0.96, 0.85),
-    mushroom(0.13, 0.9, -0.17, 0.25, 0.1, -0.96, 0.95),
-    mushroom(-0.07, 1.72, -0.16, -0.2, 0.7, -0.68, 0.9),
-    mushroom(0.09, 1.74, -0.14, 0.25, 0.75, -0.6, 0.75),
-    mushroom(0.0, 1.78, -0.09, 0, 0.95, -0.3, 0.7),
-  ]);
+  const mushrooms = mergeGeometries(MUSHROOMS.map(mushroom));
 
-  // flat tan paw with four spread fingers
+  // big flat tan paw with four spread fingers
   const fingers = [0, 1, 2, 3].map((i) => {
-    const g = S(0, 0, 0.075, 0.017, 0.013, 0.05);
-    g.rotateY((i - 1.5) * 0.2);
-    g.translate((i - 1.5) * 0.03, 0, 0);
+    const g = S(0, 0, 0.13, 0.03, 0.021, 0.11);
+    g.rotateY((i - 1.5) * 0.36);
+    g.translate((i - 1.5) * 0.05, 0, 0.02);
     return g;
   });
-  const hand = mergeGeometries([S(0, 0, 0, 0.07, 0.025, 0.07), ...fingers]);
-  hand.scale(1.15, 1.15, 1.15);
+  const hand = mergeGeometries([S(0, 0, 0, 0.11, 0.03, 0.1), ...fingers]);
 
   return {
-    cyl, body, head, earInner, face, belly, mushrooms, hand,
+    cyl, body, head, ears, face, belly, mushrooms, hand,
     bodyHull: hullOf(body, 0.014),
-    headHull: hullOf(head, 0.012),
-    handHull: hullOf(hand, 0.01),
+    headHull,
+    mushHull: hullOf(mushrooms, 0.006),
+    handHull: hullOf(hand, 0.012),
   };
 })();
 
 const hullMat = new THREE.MeshBasicMaterial({ color: 0x101010, side: THREE.BackSide });
 const tanMat = new THREE.MeshLambertMaterial({ color: TAN });
 const mushMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const faceMatHappy = new THREE.MeshLambertMaterial({ map: makeFaceTexture(false), alphaTest: 0.4 });
-const faceMatScared = new THREE.MeshLambertMaterial({ map: makeFaceTexture(true), alphaTest: 0.4 });
+// the painted parts are unlit so they look like your flat drawing
+const faceMatHappy = new THREE.MeshBasicMaterial({ map: makeFaceTexture(false), alphaTest: 0.4 });
+const faceMatScared = new THREE.MeshBasicMaterial({ map: makeFaceTexture(true), alphaTest: 0.4 });
+const bellyMat = new THREE.MeshBasicMaterial({ map: makeBellyTexture(), alphaTest: 0.4 });
 
 function makePaw() {
   const g = new THREE.Group();
@@ -865,28 +989,32 @@ function makePlushie(hex) {
 
   add(MK.body, main, g);
   add(MK.bodyHull, hullMat, g);
-  add(MK.belly, tanMat, g);
+  add(MK.belly, bellyMat, g);
   add(MK.mushrooms, mushMat, g);
+  add(MK.mushHull, hullMat, g);
 
   const headG = new THREE.Group();
-  headG.position.set(0, E0, 0);
+  headG.position.set(0, HEAD_Y, 0);
   g.add(headG);
   add(MK.head, main, headG);
   add(MK.headHull, hullMat, headG);
-  add(MK.earInner, tanMat, headG);
+  add(MK.ears, tanMat, headG);
   const face = add(MK.face, faceMatHappy, headG);
 
   const armL = makeArm(main);
   const armR = makeArm(main);
   const handL = makePaw();
   const handR = makePaw();
+  handL.rotation.y = HAND_SPLAY;   // fingers splay outward, like in your drawing
+  handR.rotation.y = -HAND_SPLAY;
   g.add(armL, armR, handL, handR);
 
   scene.add(g);
+  // The monkey faces +z, so its LEFT side is +x.
   return {
     group: g, headG, face, scared: false, armL, armR, handL, handR, main,
-    shoulderL: new THREE.Vector3(-0.30, 1.22, 0.02),
-    shoulderR: new THREE.Vector3(0.30, 1.22, 0.02),
+    shoulderL: new THREE.Vector3(0.28, 1.0, 0.02),
+    shoulderR: new THREE.Vector3(-0.28, 1.0, 0.02),
   };
 }
 
@@ -910,8 +1038,8 @@ function setArm(arm, from, to) {
   arm.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
   _ax.divideScalar(len);
   arm.quaternion.setFromUnitVectors(_up, _ax);
-  arm.children[0].scale.set(0.075, len, 0.075);
-  arm.children[1].scale.set(0.075 + HULL_T, len + 2 * HULL_T, 0.075 + HULL_T);
+  arm.children[0].scale.set(ARM_R, len, ARM_R);
+  arm.children[1].scale.set(ARM_R + HULL_T, len + 2 * HULL_T, ARM_R + HULL_T);
 }
 
 /* ------------------------------------------------------------------ */
@@ -959,8 +1087,20 @@ function footPush() {
   return true;
 }
 
+// Your virtual hands reach further than your real ones: each hand is pushed away from
+// a point just below your head, so you can touch the ground without crouching all the way.
+function updateVirtualHands() {
+  const k = CFG.armScale;
+  const sx = camera.position.x, sy = camera.position.y - CFG.shoulderDrop, sz = camera.position.z;
+  for (const h of hands) {
+    const g = h.grip.position;
+    h.vlocal.set(sx + (g.x - sx) * k, sy + (g.y - sy) * k, sz + (g.z - sz) * k);
+  }
+}
+
 function updateLocomotion(dt) {
   rig.updateMatrixWorld(true);
+  updateVirtualHands();
   const R = CFG.handRadius;
 
   // 1) Which hands are touching something, and how far did they move?
@@ -969,7 +1109,7 @@ function updateLocomotion(dt) {
   let supported = false;
   for (const h of hands) {
     if (!h.active) continue;
-    const local = h.grip.position; // position in tracking space (relative to rig)
+    const local = h.vlocal; // position in tracking space (relative to rig)
     worldOf(local, _v);
     const hit = sphereWorld(_v, R + CFG.skin, _n) > 0;
     if (hit) {
@@ -1022,7 +1162,7 @@ function updateLocomotion(dt) {
     let any = false;
     for (const h of hands) {
       if (!h.active) continue;
-      worldOf(h.grip.position, _v);
+      worldOf(h.vlocal, _v);
       const depth = sphereWorld(_v, R, _n);
       if (depth > 0) {
         rig.position.addScaledVector(_n, depth);
@@ -1042,10 +1182,10 @@ function updateLocomotion(dt) {
   rig.position.z = THREE.MathUtils.clamp(rig.position.z, -lim, lim);
   rig.updateMatrixWorld(true);
 
-  // 5) Place the visible hand spheres
+  // 5) Place the hand markers (the paw models follow these)
   for (const h of hands) {
     if (!h.active) continue;
-    worldOf(h.grip.position, _v);
+    worldOf(h.vlocal, _v);
     h.mesh.position.copy(_v);
   }
 }
@@ -1118,13 +1258,13 @@ function handleInput() {
 /* ================================================================== */
 
 /* ---------- Entities: you + bots ---------- */
-const BOT_TAG_Y = [0.2, 0.85, 1.45]; // heights of a bot's tag spheres (model units)
+const BOT_TAG_Y = [0.15, 0.65, 1.3]; // heights of a bot's tag spheres (model units)
 const BOT_NAMES = ['Waffles', 'Pickle', 'Noodle', 'Biscuit', 'Muffin', 'Turnip', 'Pancake', 'Doodle', 'Nugget'];
 
 // Bots are scaled so their eye level matches yours
 let eyeHeight = 1.6;
 let eyeInit = false;
-let botScale = (eyeHeight / E0) * CFG.botSizeBoost;
+let botScale = ((eyeHeight + 0.12) / MODEL_TOP) * CFG.botSizeBoost; // same overall height as you
 
 const player = {
   name: 'You',
@@ -1219,8 +1359,8 @@ for (const h of hands) {
 
 const statue = makePlushie(PALETTE[playerColorIdx].hex);
 statue.group.position.set(STATION.x, 0.5, STATION.z);
-statue.handL.position.set(-0.42, 0.06, 0.1);
-statue.handR.position.set(0.42, 0.06, 0.1);
+statue.handL.position.set(0.42, 0.09, 0.08);
+statue.handR.position.set(-0.42, 0.09, 0.08);
 setArm(statue.armL, statue.shoulderL, statue.handL.position);
 setArm(statue.armR, statue.shoulderR, statue.handR.position);
 let statueT = 0;
@@ -1228,7 +1368,10 @@ let statueT = 0;
 /* ---------- Game state ---------- */
 let state = 'idle'; // 'idle' | 'running' | 'intermission'
 let round = 0;
-let timer = 0;
+let timer = 0;          // intermission countdown
+let roundT = 0;         // time left in the current round
+let endedByTime = false;
+let survivorText = '';
 let lastSurvivor = '-';
 let flashText = '';
 let flashColor = '#ffffff';
@@ -1290,10 +1433,10 @@ function animateBot(bot, dt) {
   // knuckle-walking: hands alternate, lifting while they swing forward
   const pl = bot.pl;
   const s = Math.sin(bot.phase), c = Math.cos(bot.phase);
-  _bA.set(-0.42, 0.06 + Math.max(0, c) * 0.3 * amount, 0.1 + s * 0.5 * amount);
+  _bA.set(0.42, 0.09 + Math.max(0, c) * 0.3 * amount, 0.08 + s * 0.5 * amount);
   pl.handL.position.copy(_bA);
   setArm(pl.armL, pl.shoulderL, _bA);
-  _bA.set(0.42, 0.06 + Math.max(0, -c) * 0.3 * amount, 0.1 - s * 0.5 * amount);
+  _bA.set(-0.42, 0.09 + Math.max(0, -c) * 0.3 * amount, 0.08 - s * 0.5 * amount);
   pl.handR.position.copy(_bA);
   setArm(pl.armR, pl.shoulderR, _bA);
 
@@ -1314,7 +1457,7 @@ function updateTags(dt, time) {
     const inf = bot.infected;
     const pulse = inf ? 1 + 0.06 * Math.sin(time * 7 + t.phase) : 1 + 0.015 * Math.sin(time * 2 + t.phase);
     const bob = Math.sin(time * 2.2 + t.phase) * 0.05 * botScale;
-    t.sprite.position.set(bot.pos.x, 2.25 * botScale + bob, bot.pos.z);
+    t.sprite.position.set(bot.pos.x, 2.15 * botScale + bob, bot.pos.z);
     const sc = ds * pop * pulse;
     t.sprite.scale.set(1.5 * sc, 0.375 * sc, 1);
     t.sprite.material.rotation = Math.sin(time * (inf ? 9 : 2.5) + t.phase) * (inf ? 0.07 : 0.025);
@@ -1339,7 +1482,7 @@ function updateEyeHeight(dt) {
     eyeHeight += (y - eyeHeight) * (1 - Math.exp(-dt / tau));
   }
   eyeHeight = THREE.MathUtils.clamp(eyeHeight, 1.0, 2.2);
-  botScale = (eyeHeight / E0) * CFG.botSizeBoost;
+  botScale = ((eyeHeight + 0.12) / MODEL_TOP) * CFG.botSizeBoost;
 }
 
 function updateAvatar(dt) {
@@ -1351,7 +1494,7 @@ function updateAvatar(dt) {
   const sc = botScale;
   const back = 0.12; // body sits slightly behind and below your head so it stays out of your view
   const gx = _g0.x - Math.sin(avatarYaw) * back;
-  const gy = _g0.y - E0 * sc - 0.1;
+  const gy = _g0.y - EYE_M * sc - 0.1;
   const gz = _g0.z - Math.cos(avatarYaw) * back;
   const pl = playerAvatar;
   pl.group.position.set(gx, gy, gz);
@@ -1361,14 +1504,14 @@ function updateAvatar(dt) {
   const cs = Math.cos(avatarYaw), sn = Math.sin(avatarYaw);
   pl.armL.visible = pl.armR.visible = false;
   for (const h of hands) {
+    const isLeft = h.source && h.source.handedness === 'left';
     if (h.model) {
       h.model.visible = h.active;
       h.model.position.copy(h.mesh.position);
-      h.model.rotation.y = avatarYaw;
+      h.model.rotation.y = avatarYaw + (isLeft ? HAND_SPLAY : -HAND_SPLAY);
       h.model.scale.setScalar(sc);
     }
     if (!h.active) continue;
-    const isLeft = h.source && h.source.handedness === 'left';
     const arm = isLeft ? pl.armL : pl.armR;
     const dx = h.mesh.position.x - gx, dy = h.mesh.position.y - gy, dz = h.mesh.position.z - gz;
     _hl.set((dx * cs - dz * sn) / sc, dy / sc, (dx * sn + dz * cs) / sc); // hand position in body space
@@ -1432,6 +1575,8 @@ updateTags(0, 0);
 function startRound() {
   round++;
   state = 'running';
+  roundT = CFG.roundTime;
+  spotT = 0;
   const spawns = pickSpawns(entities.length);
 
   entities.forEach((e, i) => {
@@ -1456,6 +1601,17 @@ function startRound() {
   }
 }
 
+function endRound(timeUp) {
+  state = 'intermission';
+  timer = CFG.intermission;
+  endedByTime = timeUp;
+  if (timeUp) {
+    const names = entities.filter((e) => !e.infected).map((e) => e.name);
+    survivorText = names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : (names.join(', ') || 'nobody');
+    if (!player.infected) buzzAll(0.8, 200);
+  }
+}
+
 function infect(victim, by) {
   if (victim.infected) return;
   victim.infected = true;
@@ -1472,9 +1628,8 @@ function infect(victim, by) {
   }
 
   if (infectedCount() === entities.length) {
-    state = 'intermission';
-    timer = CFG.intermission;
     lastSurvivor = victim.name;
+    endRound(false);
   }
 }
 
@@ -1742,12 +1897,20 @@ function updateHud() {
   let color = '#ffffff';
   let sub;
   if (state === 'intermission') {
-    main = "EVERYONE'S INFECTED!";
-    color = '#ff5a3c';
-    sub = `Last survivor: ${lastSurvivor}  |  New round in ${Math.ceil(timer)}`;
+    if (endedByTime) {
+      main = player.infected ? "TIME'S UP!" : "TIME'S UP - YOU SURVIVED!";
+      color = player.infected ? '#ffd84d' : '#7dff9a';
+      sub = `Survivors: ${survivorText}  |  New round in ${Math.ceil(timer)}`;
+    } else {
+      main = "EVERYONE'S INFECTED!";
+      color = '#ff5a3c';
+      sub = `Last survivor: ${lastSurvivor}  |  New round in ${Math.ceil(timer)}`;
+    }
   } else {
     if (flashT > 0) { main = flashText; color = flashColor; }
-    sub = `Round ${round}  |  Infected ${infectedCount()}/${entities.length}  |  ${player.infected ? 'YOU ARE INFECTED' : 'You are safe'}`;
+    const secs = Math.max(0, Math.ceil(roundT));
+    const tstr = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    sub = `Round ${round}  |  Infected ${infectedCount()}/${entities.length}  |  ${tstr}  |  ${player.infected ? 'YOU ARE INFECTED' : 'You are safe'}`;
   }
   drawHud(main, color, sub);
 }
@@ -1771,6 +1934,11 @@ function updateGame(dt) {
     if (timer <= 0) { startRound(); return; }
   }
   flashT = Math.max(0, flashT - dt);
+
+  if (state === 'running') {
+    roundT -= dt;
+    if (roundT <= 0) { endRound(true); updateHud(); return; } // time's up: whoever is still healthy survived
+  }
 
   for (const bot of bots) {
     thinkBot(bot, dt);
